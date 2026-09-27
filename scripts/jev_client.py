@@ -11,27 +11,34 @@ import hashlib
 import json
 import os
 import time
-import winreg
 from pathlib import Path
+
+try:  # Windows-only; client stays importable on Linux/macOS
+    import winreg
+except ImportError:
+    winreg = None
 
 API_URL = "https://openrouter.ai/api/alpha/decisions"
 MODEL = "typesafe/jev-1.13"
+REQUEST_TIMEOUT = 60  # seconds; override via JEV_TIMEOUT env var
 
 
 def _get_key() -> str:
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if key:
         return key
-    try:  # setx-written value survives in registry even before shell restart
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
-            val, _ = winreg.QueryValueEx(k, "OPENROUTER_API_KEY")
-            if val and val.strip():
-                return val.strip()
-    except OSError:
-        pass
+    if winreg is not None:
+        try:  # setx-written value survives in registry even before shell restart
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
+                val, _ = winreg.QueryValueEx(k, "OPENROUTER_API_KEY")
+                if val and val.strip():
+                    return val.strip()
+        except OSError:
+            pass
     raise RuntimeError(
-        "OPENROUTER_API_KEY not found in env or HKCU\\Environment. "
-        "Run: setx OPENROUTER_API_KEY sk-or-v1-..."
+        "OPENROUTER_API_KEY not found in env"
+        + (" or HKCU\\Environment." if winreg is not None else ".")
+        + " Run: setx OPENROUTER_API_KEY sk-or-v1-..."
     )
 
 
@@ -107,6 +114,7 @@ def _log_receipt(state, questions, answers, latency_ms, raw=None):
 def _post(payload: dict) -> dict:
     import urllib.request
 
+    timeout = int(os.environ.get("JEV_TIMEOUT", REQUEST_TIMEOUT))
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         API_URL,
@@ -118,7 +126,7 @@ def _post(payload: dict) -> dict:
         method="POST",
     )
     t0 = time.time()
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         result = json.loads(resp.read().decode("utf-8"))
     latency_ms = int((time.time() - t0) * 1000)
     return result, latency_ms
@@ -169,6 +177,105 @@ def jev_gate(state: dict, question: str, instructions: str, yes: str, no: str,
     answers = jev_decide(state, questions)
     p_yes = _extract_noul(answers.get(question, {}))
     return p_yes >= threshold, p_yes
+
+
+def _chunked(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def jev_prioritize(state: dict, question: str, items: dict, instructions: str,
+                   chunk_size: int = 8, raw: bool = False):
+    """Tournament ranking for MANY candidates (100 features / ideas / risks / leads).
+
+    items = {name: description}. Jev choice questions handle few options well,
+    so candidates run in heats of <=chunk_size; heat winners advance until one
+    remains. A wild-card (highest-probability runner-up) rejoins the final.
+
+    Returns (winner, probabilities, confidence, rounds) where rounds logs every
+    heat so the ranking is auditable.
+    """
+    names = list(items.keys())
+    if len(names) <= chunk_size:
+        w, p, c = jev_choice(state, question, items, instructions)
+        rounds = [{"heat": "final", "winner": w, "probabilities": p}]
+        return (w, p, c, rounds) if raw else (w, p, c, rounds)
+
+    rounds = []
+    contenders = names
+    rnd = 1
+    while len(contenders) > chunk_size:
+        heat_winners, heat_runners = [], []
+        for i, chunk in enumerate(_chunked(contenders, chunk_size)):
+            sub = {n: items[n] for n in chunk}
+            w, p, c = jev_choice(state, f"{question}_r{rnd}_h{i}",
+                                 sub, instructions)
+            rounds.append({"round": rnd, "heat": i, "options": chunk,
+                           "winner": w, "probabilities": p})
+            heat_winners.append(w)
+            ranked = sorted((k for k in p if k in sub),
+                            key=lambda k: p.get(k, 0), reverse=True)
+            if len(ranked) > 1:
+                heat_runners.append((ranked[1], p.get(ranked[1], 0)))
+        contenders = heat_winners
+        if heat_runners and len(contenders) <= chunk_size:
+            best_runner = max(heat_runners, key=lambda t: t[1])[0]
+            if best_runner not in contenders:
+                contenders.append(best_runner)  # wild card
+                rounds.append({"round": rnd, "wild_card": best_runner})
+        rnd += 1
+
+    final = {n: items[n] for n in contenders}
+    w, p, c = jev_choice(state, f"{question}_final", final, instructions)
+    rounds.append({"round": "final", "options": contenders,
+                   "winner": w, "probabilities": p})
+    return (w, p, c, rounds)
+
+
+def jev_triage(state: dict, item: str, context: str = "",
+               low_conf_default: str = "investigate",
+               instructions: str = None, threshold: float = 0.7, raw: bool = False):
+    """Route an exception / risk / case: ignore | investigate | escalate.
+
+    Never silently ignores: when the winner's confidence is below threshold
+    the result degrades to `low_conf_default` (default: investigate).
+    Returns (route, confidence, probabilities).
+    """
+    st = dict(state)
+    if context:
+        st.setdefault("item_contexts", {})[item] = context
+    opts = {
+        "ignore": "Normal variation; no action warranted.",
+        "investigate": "Anomaly worth a human/analyst look before acting.",
+        "escalate": "Material risk requiring immediate attention or leadership.",
+    }
+    q = instructions or (f"For item '{item}', which route is warranted "
+                         "given the signals in the state?")
+    w, p, c = jev_choice(st, f"route_{item}", opts, q)
+    if (c if c is not None else (p or {}).get(w, 0)) < threshold and w != low_conf_default:
+        route = low_conf_default
+    else:
+        route = w
+    return (route, c, p) if raw else (route, c, p)
+
+
+def jev_route(state: dict, query: str, agents: dict, fallback: str = "human",
+              fallback_threshold: float = 0.7, raw: bool = False):
+    """Agent-orchestration router: which agent handles this query.
+
+    agents = {agent_name: when_to_pick_description}. If the winning
+    confidence is below fallback_threshold, route to `fallback` (default:
+    human). Returns (agent, confidence, probabilities).
+    """
+    st = dict(state)
+    st.setdefault("query", query)
+    q = (f"A customer query has arrived. Which agent should handle it? "
+         f"If no listed agent is clearly appropriate, pick '{fallback}'.")
+    w, p, c = jev_choice(st, "agent_routing", {**agents, fallback: "Anything no "
+                         "specialist agent confidently covers."}, q)
+    if (c if c is not None else (p or {}).get(w, 0)) < fallback_threshold:
+        w = fallback
+    return (w, c, p)
 
 
 def jev_case_state(state: dict, choice_question: str, choice_options: dict,

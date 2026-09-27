@@ -8,6 +8,11 @@ triggers:
   - "is evidence sufficient"
   - "decision-ready"
   - "challenge gate"
+  - "prioritize"
+  - "triage"
+  - "which deserves attention"
+  - "route to agent"
+  - "which option first"
 ---
 
 # Jev Decision Gate for Hermes
@@ -55,6 +60,12 @@ from jev_client import jev_decide, jev_choice, jev_gate, jev_case_state
 - `jev_choice(state, question, options, instructions, criteria)` - winner + full probability distribution
 - `jev_gate(state, question, instructions, yes, no, threshold=0.7)` - (passed: bool, p_yes: float)
 - `jev_case_state(...)` - the 4-question CASE STATE bundle (choice + 2 noul + score)
+- `jev_prioritize(state, question, items, ...)` - many candidates (100 features/ideas/risks/leads):
+  tournament over chunks of <=8 options, winners advance; returns final winner + runner-up + round log
+- `jev_triage(state, item, context, ...)` - ignore | investigate | escalate routing for
+  exceptions/risks/cases; low confidence defaults to 'investigate' (never silently ignore)
+- `jev_route(state, query, agents, fallback='human', ...)` - agent orchestration:
+  which agent handles this; below fallback_threshold confidence -> human fallback
 
 Key resolution order in the client: `$OPENROUTER_API_KEY` env -> `HKCU\Environment`
 registry (survives `setx` without restart).
@@ -80,7 +91,87 @@ Gate rules:
 - Every call appends a receipt to `.jev/decisions.jsonl` in the working dir
   (timestamp, state hash, questions, answers, confidences) - audit trail
 
-## Applications
+## The Universal Jev Pattern
+
+Every enterprise use case reduces to one flow:
+
+```
+INPUT STATE
+   ↓
+LLM generates: options / hypotheses / possible actions
+   ↓
+Analytics evaluates: numbers, constraints, scenarios
+   ↓
+JEV DECIDES: what deserves attention / confidence
+   ↓
+LLM continues reasoning
+   ↓
+Action / recommendation
+```
+
+LLM = thinks and creates options. Analytics = calculates.
+**Jev = decides which direction deserves attention.** Jev never replaces
+the manager — it is the decision-control layer inside the pipeline.
+
+## Enterprise use-case catalog (ranked by value)
+
+| Rank | Area | Jev question | Helper |
+|---|---|---|---|
+| 1 | AI agent orchestration | which agent handles this query? (billing/support/human) | `jev_route` |
+| 2 | Product management | which feature/experiment enters the next sprint? | `jev_prioritize` |
+| 3 | Supply chain / S&OP | which plan deserves simulation? (inventory/production/promo/outsource) | `jev_choice` |
+| 4 | FMCG innovation | which concept deserves consumer testing first? | `jev_prioritize` |
+| 5 | Consulting case solving | which hypothesis should be tested first? | `jev_case_state` |
+| 6 | Project management | which risks need immediate attention? (ignore/investigate/escalate) | `jev_triage` |
+| 7 | Sales | which leads deserve sales attention? | `jev_prioritize` |
+| 8 | Finance | which investment targets deserve due diligence? | `jev_prioritize` |
+| 9 | HR | which cases need intervention? (retention, recruitment — human oversight) | `jev_triage` |
+| 10 | Marketing | which campaign deserves A/B testing? | `jev_choice` |
+
+## Domain templates (copy-paste, adapt state)
+
+### FMCG NPD pick — which concept gets consumer testing first
+```python
+jev_choice(state, "concept_first", {
+    "protein_chips": "high protein trend, crowded shelf, low differentiation",
+    "indian_popcorn": "local flavour moat, strong brand fit, mid margin",
+    "vitamin_shots": "premium price, narrow audience, regulatory risk",
+}, "Which concept deserves consumer testing first, weighted by differentiation, brand fit and margin?")
+```
+
+### PM feature sprint — 100 requests -> next sprint
+```python
+# Analytics pre-scores (impact, effort, revenue); Jev picks under criteria
+jev_prioritize(state, "next_sprint_feature", scored_features,
+               "Which feature enters the next sprint? Weight user impact, engineering effort, revenue, strategic fit.",
+               instructions="Pick the single feature with best impact-to-effort.")
+```
+
+### S&OP plan gate — which plan deserves simulation
+```python
+jev_choice(sop_state, "plan_to_simulate", {
+    "increase_inventory": "protects service level, raises working capital",
+    "increase_production": "needs capacity check, longest lead time",
+    "reduce_promotion": "protects margin, risks volume",
+    "outsource": "fast capacity, quality + dependency risk",
+}, "Which plan deserves simulation first under the demand-surge scenario?")
+```
+
+### Risk / exception triage — ignore | investigate | escalate
+```python
+jev_triage(state, "exception_42",
+           context="Transaction anomaly: 14x typical value, known merchant, first occurrence.")
+# -> ('escalate', 0.91, p)  |  low confidence -> default to 'investigate'
+```
+
+### Agent router — who handles this query
+```python
+jev_route(query_state, "billing", {"billing": "refunds, invoices, payment failures",
+    "support": "product usage, troubleshooting", "human": "angry customer, legal threat"},
+    fallback="human")
+```
+
+## Applications (project-specific)
 
 | Workflow | Jev question | Type |
 |---|---|---|
