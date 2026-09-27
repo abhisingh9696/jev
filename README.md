@@ -62,12 +62,15 @@ import sys; sys.path.insert(0, r"<path-to>/jev/scripts")
 from jev_client import jev_decide, jev_choice, jev_gate, jev_case_state
 ```
 
-| Function | Purpose |
+| Helper | Purpose |
 |---|---|
 | `jev_decide(state, questions)` | Raw bundled call → answers dict |
 | `jev_choice(state, question, options, ...)` | Winner + full probability distribution |
 | `jev_gate(state, question, ..., threshold=0.7)` | `(passed: bool, p_yes: float)` |
 | `jev_case_state(...)` | The 4-question CASE STATE bundle (choice + 2 yes/no + score) — one request |
+| `jev_prioritize(state, question, items, ...)` | **Many candidates** (100 features/ideas/risks/leads): tournament over heats of ≤8 options with a wild-card runner-up; auditable round log |
+| `jev_triage(state, item, context, ...)` | **ignore / investigate / escalate** routing for exceptions, risks, cases — low confidence degrades to `investigate`, never silently ignores |
+| `jev_route(state, query, agents, ...)` | **Agent orchestration**: which agent handles a query; below the confidence threshold it falls back to `human` |
 
 Key resolution: `$OPENROUTER_API_KEY` env → Windows `HKCU\Environment` registry (works right after `setx`, no restart needed).
 
@@ -107,6 +110,43 @@ Gate rules:
 | Multi-agent consensus | score/rank agent proposals before full deliberation | choice + score |
 | Experiment selection | which hypothesis merits testing next | score |
 | Deck QA | is this section consistent with the fact base | noul |
+
+---
+
+## The Universal Jev Pattern
+
+Almost every enterprise use case reduces to the same flow:
+
+```
+INPUT STATE
+   ↓
+LLM generates: options / hypotheses / possible actions
+   ↓
+Analytics evaluates: numbers, constraints, scenarios
+   ↓
+JEV DECIDES: "What deserves attention?"
+   ↓
+LLM continues reasoning
+   ↓
+Action / recommendation
+```
+
+LLM = thinks and creates options. Analytics = calculates. **Jev = decides which direction deserves attention.** The opportunity is not Jev replacing managers — it is Jev becoming the **decision-control layer inside AI agents making business decisions**.
+
+## Enterprise use-case catalog (ranked by value)
+
+| Rank | Area | Example Jev question | Helper |
+|---|---|---|---|
+| 1 | AI agent orchestration | which agent handles this query? (billing / support / human) | `jev_route` |
+| 2 | Product management | which feature / experiment enters the next sprint? | `jev_prioritize` |
+| 3 | Supply chain / S&OP | which plan deserves simulation? (inventory / production / promo / outsource) | `jev_choice` |
+| 4 | FMCG innovation | which concept deserves consumer testing first? | `jev_prioritize` |
+| 5 | Consulting case solving | which hypothesis should be tested first? | `jev_case_state` |
+| 6 | Project management | which risks need immediate attention? (ignore / investigate / escalate) | `jev_triage` |
+| 7 | Sales | which leads deserve sales attention? | `jev_prioritize` |
+| 8 | Finance | which acquisition targets deserve due diligence? | `jev_prioritize` |
+| 9 | HR | which retention / recruitment cases need intervention? (human oversight) | `jev_triage` |
+| 10 | Marketing | which campaign deserves A/B testing? | `jev_choice` |
 
 ---
 
