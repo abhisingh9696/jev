@@ -1,5 +1,7 @@
 # Jev Decision Gate Skill for Hermes Agent
 
+![Without gate vs with Jev gate](comparison.png)
+
 A [Hermes Agent](https://hermes-agent.nousresearch.com) skill + helper client for **Jev** (`typesafe/jev-1.13`), a *decisions model* served through OpenRouter's alpha API. This repo gives Hermes (or any Python agent) a clean way to use Jev as a **decision gate** between reasoning steps.
 
 ---
